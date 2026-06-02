@@ -1,0 +1,27 @@
+{
+  "name": "pi-ru",
+  "version": "0.1.0",
+  "description": "Pi extension: type /ru <english> to translate to Russian and send it to the agent. Free, near-instant translation via Google (default), with MyMemory fallback and optional DeepL.",
+  "keywords": [
+    "pi-package",
+    "translation",
+    "russian",
+    "ru"
+  ],
+  "license": "MIT",
+  "type": "module",
+  "scripts": {
+    "test": "node --test test/translate.test.mjs test/command.test.mjs",
+    "test:integration": "node --test test/integration.rpc.test.mjs",
+    "test:all": "node --test test/translate.test.mjs test/command.test.mjs test/integration.rpc.test.mjs",
+    "bench": "node bench/translate-bench.mjs"
+  },
+  "peerDependencies": {
+    "@earendil-works/pi-coding-agent": "*"
+  },
+  "pi": {
+    "extensions": [
+      "./src/index.ts"
+    ]
+  }
+}
