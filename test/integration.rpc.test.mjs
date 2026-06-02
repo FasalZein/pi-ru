@@ -1,14 +1,13 @@
 /**
- * Integration test: a real `pi` process loads the extension without error.
+ * Integration test: a real `pi` process loads the extension and registers /ru.
  *
- * pi-ru works at the input seam (`pi.on("input")`), not as a registered command,
- * so it intentionally does NOT appear in `get_commands`. What this test proves
- * is the thing unit tests can't: the extension file actually loads inside a real
- * pi process (jiti import succeeds, the default export runs, the input handler
- * registers) with no load error.
+ * Proves the thing unit tests can't: the extension file actually loads inside a
+ * real pi process (jiti import succeeds, the default export runs, the command
+ * registers) with no load error, and `/ru` shows up in `get_commands` (i.e. it
+ * appears in the slash-command menu).
  *
  * Uses RPC mode + `get_commands`, which makes NO model call, so it is free and
- * deterministic. The transform logic itself is covered by the unit tests.
+ * deterministic. The translation logic itself is covered by the unit tests.
  *
  * Skips automatically if the `pi` binary is not on PATH.
  */
@@ -75,7 +74,7 @@ function rpcRequest(request, { timeoutMs = 30000 } = {}) {
 	});
 }
 
-test("pi loads the pi-ru extension without error (RPC, no model call)", async (t) => {
+test("pi loads pi-ru and registers /ru (RPC, no model call)", async (t) => {
 	if (!PI_AVAILABLE) return t.skip("pi binary not on PATH");
 
 	const { response, stderr } = await rpcRequest({ id: "1", type: "get_commands" });
@@ -87,11 +86,18 @@ test("pi loads the pi-ru extension without error (RPC, no model call)", async (t
 	// The extension loaded without a load-time error.
 	assert.doesNotMatch(
 		stderr,
-		/pi-ru|index\.ts|failed to load|extension error/i,
+		/failed to load|extension error/i,
 		`unexpected extension load error in stderr:\n${stderr}`,
 	);
 
-	// pi-ru is an input-seam extension, so it must NOT register a /ru command.
+	// /ru must be registered so it shows in the slash-command menu.
 	const ru = (response.data.commands ?? []).find((c) => c.name === "ru");
-	assert.equal(ru, undefined, "pi-ru should not register a /ru command (it uses the input seam)");
+	assert.ok(ru, "expected /ru to be registered by the extension");
+	assert.equal(ru.source, "extension");
+	assert.match(ru.description ?? "", /Russian/i);
+
+	// /ru-en (output translation toggle) must also be registered.
+	const ruEn = (response.data.commands ?? []).find((c) => c.name === "ru-en");
+	assert.ok(ruEn, "expected /ru-en to be registered by the extension");
+	assert.equal(ruEn.source, "extension");
 });

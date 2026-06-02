@@ -1,25 +1,32 @@
 # pi-ru
 
-Type `/ru <english text>` in Pi and your message is translated to Russian and
-sent to the agent **in place** — your request becomes the Russian text.
+Type `/ru <english text>` in Pi to translate the text to Russian and send the
+Russian version to the agent as your request.
 
 ```
 /ru what files are in this directory?
-→ ru → (google)
-   (your message is sent to the agent as: какие файлы находятся в этом каталоге?)
+→ ru → (google) какие файлы находятся в этом каталоге?
+   (the Russian text is sent to the agent)
 ```
 
-## How it works
+`/ru` is a registered slash command, so it appears in the `/` autocomplete menu.
 
-pi-ru hooks pi's **input seam** (`pi.on("input")`). When you send `/ru <text>`,
-it translates the text and rewrites your message in place via an input
-transform, so the conversation history shows a single Russian message — not a
-`/ru` command plus a separate injected message.
+## Reading the answer in English
 
-Because pi checks extension commands before the input event, `/ru` is
-intentionally **not** a registered slash command. That is what lets the
-extension rewrite the request in place. (Trade-off: `/ru` won't appear in the
-slash-command autocomplete menu.)
+When you're testing a model that works in Russian but you want to read its
+replies in English, toggle **output translation**:
+
+- Run `/ru-en`, or press **Option+T** (`alt+t`).
+- While on, each Russian answer gets a display-only English block beneath it,
+  added after the answer finishes streaming.
+- Toggling on also translates the most recent answer immediately.
+
+The English block is **display-only**: it is never sent back to the model, so
+the model's context stays 100% Russian across turns. This is the point for
+alignment-testing models in Russian — your reading aid never contaminates what
+the model sees.
+
+Change the shortcut with `PI_RU_EN_SHORTCUT` (e.g. `PI_RU_EN_SHORTCUT=alt+r`).
 
 ## Why
 
@@ -32,9 +39,8 @@ Providers are tried in order until one succeeds:
 
 | Order | Provider | Key needed | Notes |
 |-------|----------|-----------|-------|
-| 1 | DeepL | yes (if configured) | Official, highest quality. Used first only when a key is set. |
-| 2 | Google (unofficial) | no | Default. ~300–800ms, excellent EN→RU. |
-| 3 | MyMemory | no | No-key fallback, ~1s. |
+| 1 | Google (unofficial) | no | Default. ~300–800ms, excellent EN→RU. |
+| 2 | MyMemory | no | No-key fallback, ~1s. |
 
 The Google endpoint (`translate.googleapis.com/translate_a/single`) is
 unofficial. It needs no key and has been stable for years, which is why it is
@@ -60,10 +66,10 @@ Auto-discovery also works if you drop it in `~/.pi/agent/extensions/` or
 
 | Env var | Effect |
 |---------|--------|
-| `PI_RU_PROVIDER` | Force a single provider: `google`, `mymemory`, or `deepl`. |
-| `PI_RU_DEEPL_API_KEY` / `DEEPL_API_KEY` | Enable DeepL (preferred when set). Free keys end in `:fx`. |
+| `PI_RU_PROVIDER` | Force a single provider: `google` or `mymemory`. |
 | `PI_RU_MYMEMORY_EMAIL` | Raise MyMemory's no-key daily limit. |
 | `PI_RU_TIMEOUT_MS` | Per-provider request timeout (default `4000`). |
+| `PI_RU_EN_SHORTCUT` | Keyboard shortcut to toggle English output (default `alt+t`). |
 
 ## Speed
 
@@ -87,13 +93,14 @@ npm run test:all          # everything
 npm run bench             # live latency benchmark per provider
 ```
 
-- `test/translate.test.mjs` — behavior of the provider chain (order, fallback,
-  forcing, timeout/abort, error aggregation) via the public API with a mocked `fetch`.
-- `test/command.test.mjs` — the `/ru` input transform: translates and rewrites in place,
-  passes non-`/ru` input through, guards against loops, handles empty input and failures.
-- `test/integration.rpc.test.mjs` — spawns a real `pi --mode rpc` and asserts the
-  extension loads with no error (and, by design, registers no `/ru` command). Uses
-  `get_commands`, so it makes **no model call** and costs nothing. Auto-skips if `pi`
-  is not on PATH.
+- `test/translate.test.mjs` — provider chain (order, fallback, forcing, timeout/abort,
+  error aggregation) via the public API with a mocked `fetch`.
+- `test/command.test.mjs` — extension wiring: `/ru` translates and sends Russian; `/ru-en`
+  and the shortcut toggle a display-only English block; `agent_end` injects it only while on;
+  the context hook strips blocks so the model never sees them.
+- `test/output.test.mjs` — pure output helpers (text extraction) and the RU→EN direction.
+- `test/integration.rpc.test.mjs` — spawns a real `pi --mode rpc` and asserts `/ru` and
+  `/ru-en` register. Uses `get_commands`, so it makes **no model call** and costs nothing.
+  Auto-skips if `pi` is not on PATH.
 
 The live test inside `translate.test.mjs` auto-skips when offline.

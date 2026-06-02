@@ -18,8 +18,6 @@ import { translateToRussian } from "../src/translate.ts";
 const realFetch = globalThis.fetch;
 const ENV_KEYS = [
 	"PI_RU_PROVIDER",
-	"PI_RU_DEEPL_API_KEY",
-	"DEEPL_API_KEY",
 	"PI_RU_MYMEMORY_EMAIL",
 ];
 let savedEnv = {};
@@ -65,12 +63,9 @@ function mockFetch(handlers) {
 
 const GOOGLE = "translate.googleapis.com";
 const MYMEMORY = "api.mymemory.translated.net";
-const DEEPL_FREE = "api-free.deepl.com";
-const DEEPL_PRO = "api.deepl.com";
 
 const googleOk = (text) => jsonResponse([[[text, "src"]]]);
 const myMemoryOk = (text) => jsonResponse({ responseData: { translatedText: text } });
-const deeplOk = (text) => jsonResponse({ translations: [{ text }] });
 
 // --- behaviors ---------------------------------------------------------------
 
@@ -108,27 +103,6 @@ test("throws an aggregated error when every provider fails", async () => {
 		[MYMEMORY]: jsonResponse(null, false, 503),
 	});
 	await assert.rejects(translateToRussian("hello"), /all translation providers failed/);
-});
-
-test("prefers DeepL when a key is configured", async () => {
-	process.env.PI_RU_DEEPL_API_KEY = "secret:fx";
-	const calls = mockFetch({
-		[DEEPL_FREE]: deeplOk("Здравствуй"),
-		[GOOGLE]: googleOk("привет"),
-	});
-	const result = await translateToRussian("hello");
-	assert.equal(result.provider, "deepl");
-	assert.equal(result.text, "Здравствуй");
-	// DeepL succeeded first, so Google must not have been called.
-	assert.ok(!calls.some((u) => u.includes(GOOGLE)));
-});
-
-test("a free DeepL key (:fx) uses the api-free host", async () => {
-	process.env.DEEPL_API_KEY = "abc:fx";
-	const calls = mockFetch({ [DEEPL_FREE]: deeplOk("текст") });
-	await translateToRussian("text");
-	assert.ok(calls.some((u) => u.includes(DEEPL_FREE)));
-	assert.ok(!calls.some((u) => u.includes(DEEPL_PRO)));
 });
 
 test("PI_RU_PROVIDER forces a single provider with no fallback", async () => {

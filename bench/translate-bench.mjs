@@ -8,7 +8,6 @@
  * Run: npm run bench
  *      PI_RU_BENCH_RUNS=5 npm run bench   # repeats per phrase (default 3)
  *
- * DeepL is included only if PI_RU_DEEPL_API_KEY / DEEPL_API_KEY is set.
  * No model calls. Network required.
  */
 import { translateToRussian } from "../src/translate.ts";
@@ -72,8 +71,6 @@ async function benchProvider(provider) {
 
 async function main() {
 	const providers = ["google", "mymemory"];
-	const deeplKey = process.env.PI_RU_DEEPL_API_KEY ?? process.env.DEEPL_API_KEY;
-	if (deeplKey) providers.push("deepl");
 
 	console.log(
 		`pi-ru translation benchmark — ${PHRASES.length} phrases x ${RUNS} runs each\n`,

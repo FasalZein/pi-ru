@@ -1,33 +1,37 @@
 /**
- * pi-ru translation providers.
+ * Translation with graceful provider fallback, in either direction.
  *
- * Free, near-instant English -> Russian translation with graceful fallback.
+ * Auto provider order: Google → MyMemory. Set `PI_RU_PROVIDER` to force a
+ * single provider. Google is the default because it is fast, high quality, and
+ * needs no API key; MyMemory is the no-key safety net.
  *
- * Provider order (auto):
- *   1. DeepL   - only if PI_RU_DEEPL_API_KEY / DEEPL_API_KEY is set (official, highest quality)
- *   2. Google  - unofficial translate.googleapis.com endpoint (no key, fastest, excellent EN->RU)
- *   3. MyMemory - no-key public endpoint (slower, good quality, last resort)
+ * `translateToRussian` (EN→RU) drives the `/ru` command; `translateToEnglish`
+ * (RU→EN) drives the output-translation block.
  *
- * Force a single provider with PI_RU_PROVIDER=google|mymemory|deepl.
- *
- * The Google endpoint is unofficial. It has been stable for years and needs no
- * API key, which is why it is the default. MyMemory is a no-key safety net.
+ * @module pi-ru/translate
  */
 
-export type TranslationProvider = "google" | "mymemory" | "deepl";
+export type TranslationProvider = "google" | "mymemory";
 
 export interface TranslationResult {
 	text: string;
 	provider: TranslationProvider;
 }
 
+export interface TranslateOptions {
+	signal?: AbortSignal;
+	timeoutMs?: number;
+}
+
 const DEFAULT_TIMEOUT_MS = 4000;
-const VALID_PROVIDERS: TranslationProvider[] = ["google", "mymemory", "deepl"];
+const VALID_PROVIDERS: TranslationProvider[] = ["google", "mymemory"];
 
 /**
- * Build a child AbortSignal that aborts on either an external signal or a timeout.
- * Returns a cleanup function that must always be called to clear the timer and
- * detach the listener.
+ * Derive a child AbortSignal that fires on either an external abort or a timeout.
+ *
+ * @param external - caller-provided signal, if any
+ * @param timeoutMs - milliseconds before the derived signal aborts
+ * @returns the derived signal plus a `cleanup` that must always be called
  */
 function withTimeout(
 	external: AbortSignal | undefined,
@@ -52,10 +56,15 @@ function withTimeout(
 	};
 }
 
-async function translateGoogle(text: string, signal: AbortSignal): Promise<string> {
+async function translateGoogle(
+	text: string,
+	from: string,
+	to: string,
+	signal: AbortSignal,
+): Promise<string> {
 	const url =
 		"https://translate.googleapis.com/translate_a/single" +
-		`?client=gtx&sl=en&tl=ru&dt=t&q=${encodeURIComponent(text)}`;
+		`?client=gtx&sl=${from}&tl=${to}&dt=t&q=${encodeURIComponent(text)}`;
 	const res = await fetch(url, { signal });
 	if (!res.ok) throw new Error(`HTTP ${res.status}`);
 	// Response shape: [ [ ["translated","original",...], ... ], ... ]
@@ -69,12 +78,17 @@ async function translateGoogle(text: string, signal: AbortSignal): Promise<strin
 	return out;
 }
 
-async function translateMyMemory(text: string, signal: AbortSignal): Promise<string> {
+async function translateMyMemory(
+	text: string,
+	from: string,
+	to: string,
+	signal: AbortSignal,
+): Promise<string> {
 	const email = process.env.PI_RU_MYMEMORY_EMAIL?.trim();
 	const de = email ? `&de=${encodeURIComponent(email)}` : "";
 	const url =
 		"https://api.mymemory.translated.net/get" +
-		`?q=${encodeURIComponent(text)}&langpair=en|ru${de}`;
+		`?q=${encodeURIComponent(text)}&langpair=${from}|${to}${de}`;
 	const res = await fetch(url, { signal });
 	if (!res.ok) throw new Error(`HTTP ${res.status}`);
 	const data = (await res.json()) as {
@@ -86,69 +100,46 @@ async function translateMyMemory(text: string, signal: AbortSignal): Promise<str
 	return out;
 }
 
-async function translateDeepL(
-	text: string,
-	apiKey: string,
-	signal: AbortSignal,
-): Promise<string> {
-	// Free keys end with ":fx" and use the api-free host.
-	const endpoint = apiKey.endsWith(":fx")
-		? "https://api-free.deepl.com/v2/translate"
-		: "https://api.deepl.com/v2/translate";
-	const res = await fetch(endpoint, {
-		method: "POST",
-		headers: {
-			Authorization: `DeepL-Auth-Key ${apiKey}`,
-			"Content-Type": "application/x-www-form-urlencoded",
-		},
-		body: new URLSearchParams({ text, source_lang: "EN", target_lang: "RU" }),
-		signal,
-	});
-	if (!res.ok) throw new Error(`HTTP ${res.status}`);
-	const data = (await res.json()) as { translations?: Array<{ text?: string }> };
-	const out = data?.translations?.[0]?.text;
-	if (!out || !out.trim()) throw new Error("empty result");
-	return out;
-}
-
-function resolveProviderOrder(deeplKey: string | undefined): TranslationProvider[] {
+function resolveProviderOrder(): TranslationProvider[] {
 	const forced = process.env.PI_RU_PROVIDER?.trim().toLowerCase();
 	if (forced && (VALID_PROVIDERS as string[]).includes(forced)) {
 		return [forced as TranslationProvider];
 	}
-	const order: TranslationProvider[] = [];
-	if (deeplKey) order.push("deepl");
-	order.push("google", "mymemory");
-	return [...new Set(order)];
+	return ["google", "mymemory"];
 }
 
 /**
- * Translate English text to Russian, trying providers in order until one
- * succeeds. Throws only if every provider fails.
+ * Translate `text` from one language to another, trying providers in order
+ * until one succeeds.
+ *
+ * @param text - source text
+ * @param from - source language code (e.g. "en")
+ * @param to - target language code (e.g. "ru")
+ * @param options.signal - optional external AbortSignal
+ * @param options.timeoutMs - per-provider timeout (default {@link DEFAULT_TIMEOUT_MS})
+ * @returns the translated text and the provider that produced it
+ * @throws if `text` is empty, or if every provider fails
  */
-export async function translateToRussian(
+export async function translate(
 	text: string,
-	options?: { signal?: AbortSignal; timeoutMs?: number },
+	from: string,
+	to: string,
+	options?: TranslateOptions,
 ): Promise<TranslationResult> {
 	const trimmed = text.trim();
 	if (!trimmed) throw new Error("nothing to translate");
 
 	const timeoutMs = options?.timeoutMs ?? DEFAULT_TIMEOUT_MS;
-	const deeplKey = (process.env.PI_RU_DEEPL_API_KEY ?? process.env.DEEPL_API_KEY)?.trim();
-	const providers = resolveProviderOrder(deeplKey);
+	const providers = resolveProviderOrder();
 
 	const errors: string[] = [];
 	for (const provider of providers) {
-		if (provider === "deepl" && !deeplKey) {
-			errors.push("deepl: no API key configured");
-			continue;
-		}
 		const { signal, cleanup } = withTimeout(options?.signal, timeoutMs);
 		try {
-			let out: string;
-			if (provider === "google") out = await translateGoogle(trimmed, signal);
-			else if (provider === "mymemory") out = await translateMyMemory(trimmed, signal);
-			else out = await translateDeepL(trimmed, deeplKey as string, signal);
+			const out =
+				provider === "google"
+					? await translateGoogle(trimmed, from, to, signal)
+					: await translateMyMemory(trimmed, from, to, signal);
 			return { text: out, provider };
 		} catch (err) {
 			errors.push(`${provider}: ${(err as Error).message}`);
@@ -157,4 +148,20 @@ export async function translateToRussian(
 		}
 	}
 	throw new Error(`all translation providers failed — ${errors.join("; ")}`);
+}
+
+/** Translate English → Russian. */
+export function translateToRussian(
+	text: string,
+	options?: TranslateOptions,
+): Promise<TranslationResult> {
+	return translate(text, "en", "ru", options);
+}
+
+/** Translate Russian → English. */
+export function translateToEnglish(
+	text: string,
+	options?: TranslateOptions,
+): Promise<TranslationResult> {
+	return translate(text, "ru", "en", options);
 }
