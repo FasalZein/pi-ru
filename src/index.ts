@@ -229,10 +229,16 @@ export default function (pi: ExtensionAPI) {
 	// toggle is on, show its English translation below. Fire-and-forget: don't
 	// block the agent loop while the translation completes.
 	pi.on("agent_end", async (event, ctx) => {
+		// First try event.messages for the latest assistant text.
 		const assistantTexts = (event.messages ?? [])
 			.filter(isTranslatableAssistantMessage)
 			.map(extractAssistantText);
-		const latest = assistantTexts[assistantTexts.length - 1];
+		let latest = assistantTexts[assistantTexts.length - 1];
+		// Fallback: check the full session history (handles tool-only turns,
+		// partial completions, or when event.messages is incomplete).
+		if (!latest && ctx) {
+			latest = latestAssistantTextFromEntries(ctx.sessionManager.getBranch());
+		}
 		if (latest) lastAssistantText = latest;
 		if (outputOn && latest) queueEnglish(latest, ctx);
 	});
@@ -250,13 +256,12 @@ export default function (pi: ExtensionAPI) {
 			);
 			return;
 		}
-		// Turning on: translate the latest Russian answer right away. Fall back to
-		// the session history when the in-memory cache is empty (e.g. after reload).
-		let text = lastAssistantText;
-		if (!text) {
-			text = latestAssistantTextFromEntries(ctx.sessionManager.getBranch());
-			if (text) lastAssistantText = text;
-		}
+		// Turning on: always check session history for the latest Russian answer.
+		// The in-memory cache may be stale if agent_end didn't fire for the most
+		// recent turn (e.g. tool-only turns, or partial streaming completions).
+		let text = latestAssistantTextFromEntries(ctx.sessionManager.getBranch());
+		if (text) lastAssistantText = text;
+		if (!text) text = lastAssistantText;
 		if (text) {
 			// No "ON" toast: the footer mode indicator (→EN) plus the
 			// "EN: translating…" loader from showEnglishFor are the feedback.
