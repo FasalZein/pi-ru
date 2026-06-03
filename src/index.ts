@@ -29,7 +29,6 @@ import type { ExtensionAPI, ExtensionContext } from "@earendil-works/pi-coding-a
 import { getMarkdownTheme } from "@earendil-works/pi-coding-agent";
 import { Box, Markdown, Text } from "@earendil-works/pi-tui";
 import {
-	RU_EN_MESSAGE_TYPE,
 	extractAssistantText,
 	isTranslatableAssistantMessage,
 	latestAssistantTextFromEntries,
@@ -132,14 +131,28 @@ export default function (pi: ExtensionAPI) {
 		},
 	});
 
-	// Persistent mode: rewrite typed English to Russian at the input seam.
+	// Invalidate pending output translations when the user sends new input, so a
+	// stale translation from the previous answer doesn't appear during the next
+	// turn (the "wrong place" bug). Also clears the widget to start fresh.
 	pi.on("input", async (event, ctx) => {
-		if (!inputOn) return { action: "continue" };
+		if (!inputOn) {
+			// Only invalidate; don't interfere with normal pass-through.
+			if (outputOn && event.source !== "extension") {
+				invalidatePendingOutput(ctx);
+				ctx?.ui.setWidget("pi-ru-en", undefined);
+			}
+			return { action: "continue" };
+		}
 		if (event.source === "extension") return { action: "continue" };
 		const text = event.text;
 		// Leave commands and bash lines alone.
 		if (!text.trim() || text.startsWith("/") || text.startsWith("!")) {
 			return { action: "continue" };
+		}
+		// Invalidate stale output translation before translating input.
+		if (outputOn) {
+			invalidatePendingOutput(ctx);
+			ctx?.ui.setWidget("pi-ru-en", undefined);
 		}
 		try {
 			const { text: translated } = await translateToRussian(text, {
@@ -153,75 +166,51 @@ export default function (pi: ExtensionAPI) {
 		}
 	});
 
-	// --- output: Russian answer -> display-only English block ---------------
-	// Render the English block beneath the Russian answer. Honors `expanded`
-	// (Ctrl+O) just like tool output: collapsed shows a one-line preview.
-	pi.registerMessageRenderer(RU_EN_MESSAGE_TYPE, (message, { expanded }, theme) => {
-		const details = message.details as { provider?: string } | undefined;
-		const header = `EN${details?.provider ? ` (${details.provider})` : ""}`;
-		const full = String(message.content ?? "");
-		const multiline = full.includes("\n");
-		const box = new Box(0, 1, (t) => theme.bg("customMessageBg", t));
-		// Collapsed multi-line block: show a one-line plain preview + expand hint.
-		if (!expanded && multiline) {
-			const firstLine = full.split("\n", 1)[0] ?? "";
-			box.addChild(
-				new Text(
-					theme.fg("dim", `${header}: `) +
-						firstLine +
-						theme.fg("dim", "  … (ctrl+o to expand)"),
-					0,
-					0,
-				),
-			);
-			return box;
-		}
-		// Expanded (or single-line): render the English as real markdown so
-		// headings, lists, tables and code blocks keep their formatting.
-		box.addChild(new Text(theme.fg("dim", `${header}:`), 0, 0));
-		box.addChild(new Markdown(full, 0, 0, getMarkdownTheme()));
-		return box;
-	});
+	// --- output: Russian answer -> display-only English widget ----------------
+	// Uses ctx.ui.setWidget (never enters the session or model context) instead of
+	// pi.sendMessage which was being treated as model input. The widget appears
+	// below the editor and is replaced/cleared as needed.
 
-	// Keep injected English blocks OUT of the model's context (display-only).
-	pi.on("context", async (event) => {
-		const messages = event.messages.filter(
-			(m) => (m as { customType?: string }).customType !== RU_EN_MESSAGE_TYPE,
+	function showEnglishWidget(ctx: ExtensionContext, text: string, provider?: string): void {
+		ctx.ui.setWidget(
+			"pi-ru-en",
+			(_tui, theme) => {
+				const header = `EN${provider ? ` (${provider})` : ""}:`;
+				const box = new Box(0, 1, (t) => theme.bg("customMessageBg", t));
+				box.addChild(new Text(theme.fg("dim", header), 0, 0));
+				box.addChild(new Markdown(text, 0, 0, getMarkdownTheme()));
+				return box;
+			},
+			{ placement: "belowEditor" },
 		);
-		return { messages };
-	});
+	}
+
+	function invalidatePendingOutput(ctx?: ExtensionContext): void {
+		outputGen++;
+		ctx?.ui.setStatus("pi-ru-en", undefined);
+	}
 
 	async function showEnglishFor(text: string, ctx: ExtensionContext | undefined, gen: number): Promise<void> {
 		const trimmed = text.trim();
-		if (!trimmed) return;
+		if (!trimmed || !ctx) return;
 		// Loader: long answers take a few seconds to translate (chunked). Show a
 		// footer indicator under its own key so the mode label is left intact.
-		ctx?.ui.setStatus("pi-ru-en", "EN: translating…");
+		ctx.ui.setStatus("pi-ru-en", "EN: translating…");
 		try {
 			const { text: english, provider } = await translateToEnglish(trimmed, {
 				timeoutMs: resolveTimeoutMs(),
 			});
-			// Toggled off (or toggled again) while translating: drop this result so
-			// no stale block appears and ordering stays correct.
+			// Toggled off, toggled again, or a new user input arrived while translating:
+			// drop this result so no stale translation appears in the wrong place.
 			if (gen !== outputGen) return;
-			pi.sendMessage({
-				customType: RU_EN_MESSAGE_TYPE,
-				content: english,
-				display: true,
-				details: { provider },
-			});
+			showEnglishWidget(ctx, english, provider);
 		} catch (err) {
 			if (gen !== outputGen) return;
-			pi.sendMessage({
-				customType: RU_EN_MESSAGE_TYPE,
-				content: `translation failed: ${(err as Error).message}`,
-				display: true,
-				details: {},
-			});
+			showEnglishWidget(ctx, `translation failed: ${(err as Error).message}`);
 		} finally {
 			// Only the active generation owns the loader; a stale translation must
 			// not clear a loader that a newer translation is showing.
-			if (gen === outputGen) ctx?.ui.setStatus("pi-ru-en", undefined);
+			if (gen === outputGen) ctx.ui.setStatus("pi-ru-en", undefined);
 		}
 	}
 
@@ -237,14 +226,15 @@ export default function (pi: ExtensionAPI) {
 	}
 
 	// After each prompt finishes, remember the last Russian answer and, when the
-	// toggle is on, show its English translation below.
+	// toggle is on, show its English translation below. Fire-and-forget: don't
+	// block the agent loop while the translation completes.
 	pi.on("agent_end", async (event, ctx) => {
 		const assistantTexts = (event.messages ?? [])
 			.filter(isTranslatableAssistantMessage)
 			.map(extractAssistantText);
 		const latest = assistantTexts[assistantTexts.length - 1];
 		if (latest) lastAssistantText = latest;
-		if (outputOn && latest) await queueEnglish(latest, ctx);
+		if (outputOn && latest) queueEnglish(latest, ctx);
 	});
 
 	async function toggleOutput(ctx: ExtensionContext): Promise<void> {
@@ -253,8 +243,9 @@ export default function (pi: ExtensionAPI) {
 		refreshStatus(ctx);
 		if (!outputOn) {
 			ctx.ui.setStatus("pi-ru-en", undefined); // clear any lingering loader
+			ctx.ui.setWidget("pi-ru-en", undefined); // hide the translation panel
 			ctx.ui.notify(
-				"English output translation: OFF (new answers won't be translated; existing blocks stay — collapse with ctrl+o)",
+				"English output translation: OFF",
 				"info",
 			);
 			return;
