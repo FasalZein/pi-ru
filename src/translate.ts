@@ -51,6 +51,39 @@ const PROVIDER_CONCURRENCY: Record<TranslationProvider, number> = {
 const utf8Bytes = (s: string): number => new TextEncoder().encode(s).length;
 
 /**
+ * `encodeURIComponent` throws on malformed JS strings (lone surrogate code
+ * units). Pasted/minified/binary-ish text can contain those, so normalize to a
+ * well-formed Unicode string before putting text in provider URLs. Valid
+ * surrogate pairs (emoji, etc.) are preserved; only invalid lone surrogates are
+ * replaced with U+FFFD.
+ */
+function toWellFormedText(s: string): string {
+	if (typeof (s as { toWellFormed?: () => string }).toWellFormed === "function") {
+		return (s as { toWellFormed: () => string }).toWellFormed();
+	}
+	let out = "";
+	for (let i = 0; i < s.length; i++) {
+		const code = s.charCodeAt(i);
+		if (code >= 0xd800 && code <= 0xdbff) {
+			const next = s.charCodeAt(i + 1);
+			if (next >= 0xdc00 && next <= 0xdfff) {
+				out += s[i] + s[i + 1];
+				i++;
+			} else {
+				out += "\uFFFD";
+			}
+		} else if (code >= 0xdc00 && code <= 0xdfff) {
+			out += "\uFFFD";
+		} else {
+			out += s[i];
+		}
+	}
+	return out;
+}
+
+const encodeQuery = (s: string): string => encodeURIComponent(toWellFormedText(s));
+
+/**
  * Derive a child AbortSignal that fires on a timeout or on any of the given
  * external signals. Returns the derived signal plus a `cleanup` that must always
  * be called to clear the timer and detach listeners.
@@ -127,7 +160,7 @@ async function translateGoogle(
 ): Promise<string> {
 	const url =
 		"https://translate.googleapis.com/translate_a/single" +
-		`?client=gtx&sl=${from}&tl=${to}&dt=t&q=${encodeURIComponent(text)}`;
+		`?client=gtx&sl=${from}&tl=${to}&dt=t&q=${encodeQuery(text)}`;
 	const res = await fetch(url, { signal });
 	if (!res.ok) throw new Error(`HTTP ${res.status}`);
 	// Response shape: [ [ ["translated","original",...], ... ], ... ]
@@ -148,10 +181,10 @@ async function translateMyMemory(
 	signal: AbortSignal,
 ): Promise<string> {
 	const email = process.env.PI_RU_MYMEMORY_EMAIL?.trim();
-	const de = email ? `&de=${encodeURIComponent(email)}` : "";
+	const de = email ? `&de=${encodeQuery(email)}` : "";
 	const url =
 		"https://api.mymemory.translated.net/get" +
-		`?q=${encodeURIComponent(text)}&langpair=${from}|${to}${de}`;
+		`?q=${encodeQuery(text)}&langpair=${from}|${to}${de}`;
 	const res = await fetch(url, { signal });
 	if (!res.ok) throw new Error(`HTTP ${res.status}`);
 	const data = (await res.json()) as {

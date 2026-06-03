@@ -258,6 +258,34 @@ test("huge unbroken token (~100KB) hard-splits in linear time", async () => {
 	assert.ok(elapsedMs < 1500, `hard-splitting regressed to ${elapsedMs.toFixed(0)}ms`);
 });
 
+test("huge emoji token keeps surrogate pairs intact", async () => {
+	process.env.PI_RU_PROVIDER = "google";
+	const input = "😀".repeat(30_000);
+	let calls = 0;
+	globalThis.fetch = async (url) => {
+		calls++;
+		const q = decodeURIComponent(String(url).split("&q=")[1] ?? "");
+		return { ok: true, status: 200, json: async () => [[[q, q]]] };
+	};
+	const result = await translateToRussian(input, { timeoutMs: 60_000 });
+	assert.ok(calls > 50, `expected many emoji chunks, got ${calls}`);
+	assert.equal(result.text, input);
+});
+
+test("malformed pasted text with lone surrogates is made URL-safe", async () => {
+	process.env.PI_RU_PROVIDER = "google";
+	const input = `before ${"\uD800"} after ${"\uDC00"}`;
+	let sawReplacement = false;
+	globalThis.fetch = async (url) => {
+		const q = decodeURIComponent(String(url).split("&q=")[1] ?? "");
+		sawReplacement = q.includes("�");
+		return { ok: true, status: 200, json: async () => [[[q, q]]] };
+	};
+	const result = await translateToRussian(input);
+	assert.equal(result.text, "before � after �");
+	assert.equal(sawReplacement, true);
+});
+
 test("PI_RU_PROVIDER forces a single provider with no fallback", async () => {
 	process.env.PI_RU_PROVIDER = "mymemory";
 	const calls = mockFetch({
