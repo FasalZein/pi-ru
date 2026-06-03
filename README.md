@@ -6,7 +6,8 @@ inside your session:
 - **Type in English, the agent receives Russian.** Write your prompt in
   English and pi-ru sends the Russian translation to the agent.
 - **Read the agent's Russian answers in English.** Toggle a display-only
-  English translation that appears under each Russian reply.
+  English translation panel that appears above the input field, between
+  the agent's reply and your editor.
 
 Translation is free and near-instant (Google by default, MyMemory as a no-key
 fallback) — no API key required.
@@ -42,7 +43,7 @@ That's it. The agent gets the Russian text as if you had typed it yourself.
 - **Auto input mode** — `/ru on` translates every plain English message you
   type before it reaches the agent; `/ru off` turns it back off.
 - **Read answers in English** — `/ru-en` (or **Option+T**) shows an English
-  translation under each Russian answer, rendered as markdown.
+  translation panel above the input field, rendered as markdown.
 - **Markdown-safe** — headings, lists, tables, and code blocks keep their
   formatting through translation.
 - **Handles huge messages** — long text is split into provider-sized chunks,
@@ -79,22 +80,21 @@ untranslated, even in auto mode.
 When the agent replies in Russian and you'd rather read English:
 
 - Run `/ru-en`, or press **Option+T** (`alt+t`).
-- While on, each Russian answer gets an English translation block beneath it,
-  added after the answer finishes streaming.
+- While on, each Russian answer gets an English translation panel displayed
+  above the input field, added after the answer finishes streaming.
 - Turning it on also translates the most recent answer immediately — even right
   after a reload, it falls back to the last answer in the session history.
 - While a translation is running, the footer shows an `EN: translating…` loader
   so long answers don't look stuck.
 
-The English block is rendered as **markdown** and respects **Ctrl+O**
-(expand/collapse) like tool output: collapsed it shows a one-line preview,
-expanded it shows the full translation.
+The English panel is rendered as **markdown** with full formatting support
+(headings, tables, code blocks, lists).
 
-The block is **display-only** — it is never sent back to the agent, so the
-conversation the model sees stays exactly as it was (all Russian). Turning the
-toggle off stops translating new answers; blocks already shown stay in the
-transcript (collapse them with Ctrl+O), since Pi has no API to remove a message
-once it's displayed.
+The panel is **display-only** — it is a pure UI widget that never enters the
+session transcript or model context, so the conversation the model sees stays
+exactly as it was (all Russian). Turning the toggle off hides the panel
+immediately. Each new answer replaces the previous translation, and new user
+input clears stale translations automatically.
 
 Change the shortcut with `PI_RU_EN_SHORTCUT` (e.g. `PI_RU_EN_SHORTCUT=alt+r`).
 
