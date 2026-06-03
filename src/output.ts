@@ -45,3 +45,23 @@ export function isTranslatableAssistantMessage(message: unknown): boolean {
 	if ((message as { role?: string }).role !== "assistant") return false;
 	return extractAssistantText(message).length > 0;
 }
+
+/**
+ * Walk session entries (as returned by `sessionManager.getBranch()`, root→leaf
+ * order) and return the prose of the most recent translatable assistant
+ * message, or "" when there is none.
+ *
+ * Used so the output toggle can translate the latest answer even right after a
+ * reload, when the in-memory `lastAssistantText` cache is empty.
+ */
+export function latestAssistantTextFromEntries(entries: unknown): string {
+	if (!Array.isArray(entries)) return "";
+	for (let i = entries.length - 1; i >= 0; i--) {
+		const entry = entries[i];
+		const message = (entry as { message?: unknown } | null)?.message;
+		if (isTranslatableAssistantMessage(message)) {
+			return extractAssistantText(message);
+		}
+	}
+	return "";
+}

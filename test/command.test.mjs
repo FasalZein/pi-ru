@@ -28,10 +28,13 @@ function loadExtension() {
 	const commands = {};
 	const handlers = {};
 	const shortcuts = {};
+	const events = {};
 	let renderer;
 	const sent = []; // sendUserMessage
 	const injected = []; // sendMessage (custom blocks)
 	const notes = [];
+	const statuses = [];
+	let sessionEntries = []; // what ctx.sessionManager.getBranch() returns
 
 	const pi = {
 		registerCommand: (name, opts) => {
@@ -46,6 +49,12 @@ function loadExtension() {
 		on: (event, fn) => {
 			handlers[event] = fn;
 		},
+		events: {
+			on: (name, fn) => {
+				events[name] = fn;
+			},
+			emit: () => {},
+		},
 		sendUserMessage: (text, opts) => {
 			sent.push({ text, opts });
 		},
@@ -58,12 +67,27 @@ function loadExtension() {
 	const ctx = {
 		ui: {
 			notify: (message, level) => notes.push({ message, level }),
-			setStatus: () => {},
+			setStatus: (_key, value) => statuses.push(value),
 		},
+		sessionManager: { getBranch: () => sessionEntries },
 		isIdle: () => true,
 		signal: undefined,
 	};
-	return { commands, handlers, shortcuts, renderer, sent, injected, notes, ctx };
+	return {
+		commands,
+		handlers,
+		shortcuts,
+		events,
+		renderer,
+		sent,
+		injected,
+		notes,
+		statuses,
+		ctx,
+		setSessionEntries: (entries) => {
+			sessionEntries = entries;
+		},
+	};
 }
 
 function mockGoogle(translated) {
@@ -91,11 +115,11 @@ test("translates the argument and sends the Russian text to the agent", async ()
 	assert.equal(sent[0].text, "какие файлы здесь?");
 });
 
-test("shows a warning and sends nothing when /ru has no text", async () => {
+test("shows usage and sends nothing when /ru has no text", async () => {
 	const { commands, sent, notes, ctx } = loadExtension();
 	await commands.ru.handler("   ", ctx);
 	assert.equal(sent.length, 0);
-	assert.ok(notes.some((n) => n.level === "warning"));
+	assert.ok(notes.some((n) => /usage/i.test(n.message)));
 });
 
 test("reports an error (and sends nothing) when /ru translation fails", async () => {
@@ -105,6 +129,66 @@ test("reports an error (and sends nothing) when /ru translation fails", async ()
 	await commands.ru.handler("hello", ctx);
 	assert.equal(sent.length, 0);
 	assert.ok(notes.some((n) => n.level === "error"));
+});
+
+// --- persistent input mode: /ru on|off + input transform --------------------
+
+test("/ru on enables auto mode; the input handler translates plain English", async () => {
+	mockGoogle("привет мир");
+	const { commands, handlers, ctx } = loadExtension();
+	// Off by default: input passes through.
+	let result = await handlers.input({ text: "hello world", source: "interactive" }, ctx);
+	assert.equal(result.action, "continue");
+
+	await commands.ru.handler("on", ctx);
+	result = await handlers.input({ text: "hello world", source: "interactive" }, ctx);
+	assert.equal(result.action, "transform");
+	assert.equal(result.text, "привет мир");
+});
+
+test("auto mode leaves slash commands and bash lines untouched", async () => {
+	mockGoogle("не должно использоваться");
+	const { commands, handlers, ctx } = loadExtension();
+	await commands.ru.handler("on", ctx);
+	for (const text of ["/model", "!ls -la", "   "]) {
+		const result = await handlers.input({ text, source: "interactive" }, ctx);
+		assert.equal(result.action, "continue", `should pass through: ${JSON.stringify(text)}`);
+	}
+});
+
+test("/ru off disables auto mode again", async () => {
+	mockGoogle("привет");
+	const { commands, handlers, ctx } = loadExtension();
+	await commands.ru.handler("on", ctx);
+	await commands.ru.handler("off", ctx);
+	const result = await handlers.input({ text: "hello", source: "interactive" }, ctx);
+	assert.equal(result.action, "continue");
+});
+
+test("auto mode ignores extension-sourced input (loop guard)", async () => {
+	mockGoogle("привет");
+	const { commands, handlers, ctx } = loadExtension();
+	await commands.ru.handler("on", ctx);
+	const result = await handlers.input({ text: "hello", source: "extension" }, ctx);
+	assert.equal(result.action, "continue");
+});
+
+// --- footer widget ----------------------------------------------------------
+
+test("contributes a fancy-footer widget that reflects the active mode", async () => {
+	const { commands, events, ctx } = loadExtension();
+	let registered;
+	assert.equal(typeof events["pi-fancy-footer:discover-widgets"], "function");
+	events["pi-fancy-footer:discover-widgets"]({ registerWidget: (w) => (registered = w) });
+	assert.equal(registered.id, "pi-ru.mode");
+
+	// Hidden when no mode is active.
+	assert.equal(registered.visible(), false);
+
+	// Turning auto input on makes it visible and render the input arrow.
+	await commands.ru.handler("on", ctx);
+	assert.equal(registered.visible(), true);
+	assert.equal(registered.render(), "RU→");
 });
 
 // --- output side: /ru-en toggle + shortcut + agent_end -----------------------
@@ -156,24 +240,62 @@ test("while on, each finished answer gets an English block", async () => {
 	await shortcuts["alt+t"].handler(ctx); // toggle on (no prior answer yet)
 	assert.equal(injected.length, 0);
 
-	await handlers.agent_end({
-		messages: [
-			{ role: "user", content: "вопрос" },
-			{ role: "assistant", content: "ответ" },
-		],
-	});
+	await handlers.agent_end(
+		{
+			messages: [
+				{ role: "user", content: "вопрос" },
+				{ role: "assistant", content: "ответ" },
+			],
+		},
+		ctx,
+	);
 	assert.equal(injected.length, 1);
 	assert.equal(injected[0].content, "translated");
+});
+
+test("toggling on falls back to session history when no answer was captured yet", async () => {
+	mockGoogle("from history");
+	const { shortcuts, injected, ctx, setSessionEntries } = loadExtension();
+	// Simulate a reload: nothing captured in-memory, but the session has an answer.
+	setSessionEntries([
+		{ type: "message", message: { role: "user", content: "вопрос" } },
+		{ type: "message", message: { role: "assistant", content: "русский ответ" } },
+	]);
+	await shortcuts["alt+t"].handler(ctx);
+	assert.equal(injected.length, 1, "should translate the latest answer from history");
+	assert.equal(injected[0].content, "from history");
 });
 
 test("a failed output translation still surfaces a block (not silent)", async () => {
 	process.env.PI_RU_PROVIDER = "google";
 	globalThis.fetch = async () => ({ ok: false, status: 500, json: async () => null });
 	const { commands, handlers, injected, ctx } = loadExtension();
-	await handlers.agent_end({ messages: [{ role: "assistant", content: "привет" }] });
+	await handlers.agent_end({ messages: [{ role: "assistant", content: "привет" }] }, ctx);
 	await commands["ru-en"].handler("", ctx);
 	assert.equal(injected.length, 1);
 	assert.match(injected[0].content, /translation failed/i);
+});
+
+test("a translation that resolves after toggle-off does NOT inject a stale block", async () => {
+	// Gate the fetch so we can toggle off while the translation is in flight.
+	let release;
+	const gate = new Promise((r) => {
+		release = r;
+	});
+	globalThis.fetch = async (url) => {
+		await gate;
+		const q = decodeURIComponent(String(url).split("&q=")[1] ?? "");
+		return { ok: true, status: 200, json: async () => [[[q, q]]] };
+	};
+	const { commands, handlers, injected, ctx } = loadExtension();
+	await handlers.agent_end({ messages: [{ role: "assistant", content: "ответ" }] }, ctx);
+
+	const onPromise = commands["ru-en"].handler("", ctx); // toggle ON -> starts translating (blocked on gate)
+	await commands["ru-en"].handler("", ctx); // toggle OFF while in flight (bumps generation)
+	release(); // let the stale translation resolve
+	await onPromise;
+
+	assert.equal(injected.length, 0, "stale translation must be dropped after toggle-off");
 });
 
 test("context hook strips English blocks so the model never sees them", async () => {

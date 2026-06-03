@@ -105,6 +105,159 @@ test("throws an aggregated error when every provider fails", async () => {
 	await assert.rejects(translateToRussian("hello"), /all translation providers failed/);
 });
 
+test("splits long text into chunks and rejoins preserving line structure", async () => {
+	process.env.PI_RU_PROVIDER = "google";
+	// Each line is short, but the whole exceeds Google's 1800-byte chunk budget,
+	// so it must be sent in multiple requests and rejoined with newlines.
+	const lineCount = 80;
+	const input = Array.from({ length: lineCount }, (_, i) => `line number ${i} word word`).join("\n");
+	const calls = [];
+	globalThis.fetch = async (url) => {
+		calls.push(String(url));
+		// Echo back the decoded q so we can verify rejoining is faithful.
+		const q = decodeURIComponent(String(url).split("&q=")[1] ?? "");
+		return { ok: true, status: 200, json: async () => [[[q, q]]] };
+	};
+	const result = await translateToRussian(input);
+	assert.ok(calls.length > 1, `expected multiple chunk requests, got ${calls.length}`);
+	// Rejoined output must equal the original (echo provider) with all lines intact.
+	assert.equal(result.text.split("\n").length, lineCount);
+	assert.equal(result.text, input);
+});
+
+test("a single oversized line is split and rejoined without newlines", async () => {
+	process.env.PI_RU_PROVIDER = "google";
+	const input = `${"averylongword ".repeat(300)}end`; // one line, way over budget, no \n
+	const calls = [];
+	globalThis.fetch = async (url) => {
+		calls.push(String(url));
+		const q = decodeURIComponent(String(url).split("&q=")[1] ?? "");
+		return { ok: true, status: 200, json: async () => [[[q, q]]] };
+	};
+	const result = await translateToRussian(input);
+	assert.ok(calls.length > 1, "expected the oversized line to be split");
+	assert.ok(!result.text.includes("\n"), "single-line input must not gain newlines");
+	assert.equal(result.text.replace(/\s+/g, " ").trim(), input.replace(/\s+/g, " ").trim());
+});
+
+test("preserves blank-line separators after an oversized line (markdown spacing)", async () => {
+	process.env.PI_RU_PROVIDER = "google";
+	// Oversized paragraph, then a blank line, then a heading, then a blank line,
+	// then a list. This is the exact P2 case that previously collapsed \n\n.
+	const longPara = "word ".repeat(600).trim(); // > 1800 bytes, one line
+	const input = `${longPara}\n\n## Heading\n\n- a\n- b`;
+	// Echo provider that mimics Google: strips leading/trailing newlines per chunk.
+	globalThis.fetch = async (url) => {
+		const q = decodeURIComponent(String(url).split("&q=")[1] ?? "").replace(/^\n+|\n+$/g, "");
+		return { ok: true, status: 200, json: async () => [[[q, q]]] };
+	};
+	const result = await translateToRussian(input);
+	// The double newlines around the heading must survive.
+	assert.ok(result.text.includes("\n\n## Heading\n\n"), `lost blank lines: ${JSON.stringify(result.text.slice(-60))}`);
+	assert.ok(result.text.includes("- a\n- b"), "list lines must stay on separate lines");
+});
+
+test("translates chunks in parallel but rejoins in original order", async () => {
+	process.env.PI_RU_PROVIDER = "google";
+	// Many short lines -> many chunks. Resolve later chunks FIRST to prove the
+	// rejoin is index-ordered, not completion-ordered.
+	const lineCount = 120;
+	const input = Array.from({ length: lineCount }, (_, i) => `line ${i} padding padding`).join("\n");
+	let inFlight = 0;
+	let maxInFlight = 0;
+	globalThis.fetch = async (url) => {
+		const q = decodeURIComponent(String(url).split("&q=")[1] ?? "");
+		inFlight++;
+		maxInFlight = Math.max(maxInFlight, inFlight);
+		// Reverse-bias the delay so later requests resolve before earlier ones.
+		const delay = q.includes(`line ${lineCount - 1} `) ? 0 : 5;
+		await new Promise((r) => setTimeout(r, delay));
+		inFlight--;
+		return { ok: true, status: 200, json: async () => [[[q, q]]] };
+	};
+	const result = await translateToRussian(input);
+	assert.equal(result.text, input, "order must match the original despite out-of-order completion");
+	assert.ok(maxInFlight > 1, `expected concurrent requests, sawmax ${maxInFlight}`);
+});
+
+test("one failed chunk fails the whole provider attempt (and aborts siblings)", async () => {
+	process.env.PI_RU_PROVIDER = "google";
+	const input = Array.from({ length: 60 }, (_, i) => `line ${i} padding padding`).join("\n");
+	let started = 0;
+	globalThis.fetch = async (url) => {
+		started++;
+		const q = decodeURIComponent(String(url).split("&q=")[1] ?? "");
+		if (q.includes("line 0 ")) return { ok: false, status: 500, json: async () => null };
+		return { ok: true, status: 200, json: async () => [[[q, q]]] };
+	};
+	await assert.rejects(translateToRussian(input), /all translation providers failed/);
+	// Sanity: it didn't fan out to every chunk after the failure (bounded + abort).
+	assert.ok(started >= 1);
+});
+
+test("bounds concurrency: never exceeds the per-provider in-flight cap", async () => {
+	process.env.PI_RU_PROVIDER = "google"; // documented cap = 6
+	// Many small chunks (well over the cap) so the limiter is actually exercised.
+	const input = Array.from({ length: 200 }, (_, i) => `строка ${i} слово слово слово`).join("\n");
+	let inFlight = 0;
+	let maxInFlight = 0;
+	globalThis.fetch = async (url) => {
+		inFlight++;
+		maxInFlight = Math.max(maxInFlight, inFlight);
+		const q = decodeURIComponent(String(url).split("&q=")[1] ?? "");
+		await new Promise((r) => setTimeout(r, 2));
+		inFlight--;
+		return { ok: true, status: 200, json: async () => [[[q, q]]] };
+	};
+	const result = await translateToRussian(input);
+	assert.equal(result.text, input, "output must stay faithful under concurrency");
+	assert.ok(maxInFlight > 1, `expected real concurrency, saw max ${maxInFlight}`);
+	assert.ok(maxInFlight <= 6, `in-flight cap exceeded: ${maxInFlight} > 6`);
+});
+
+test("huge input (~200KB) translates faithfully without losing chunks", async () => {
+	process.env.PI_RU_PROVIDER = "google";
+	const line = "Это предложение с несколькими словами для имитации реального абзаца";
+	const lines = [];
+	let bytes = 0;
+	let i = 0;
+	while (bytes < 200_000) {
+		const l = `${line} (строка ${i++})`;
+		lines.push(l);
+		if (i % 6 === 0) lines.push(""); // paragraph breaks
+		bytes += new TextEncoder().encode(l).length + 1;
+	}
+	const input = lines.join("\n");
+	let calls = 0;
+	globalThis.fetch = async (url) => {
+		calls++;
+		// Mimic Google stripping leading/trailing newlines of each chunk.
+		const q = decodeURIComponent(String(url).split("&q=")[1] ?? "").replace(/^\n+|\n+$/g, "");
+		return { ok: true, status: 200, json: async () => [[[q, q]]] };
+	};
+	const result = await translateToRussian(input);
+	assert.ok(calls > 50, `expected many chunks for huge input, got ${calls}`);
+	assert.equal(result.text, input, "huge input must round-trip exactly (no dropped/merged lines)");
+});
+
+test("huge unbroken token (~100KB) hard-splits in linear time", async () => {
+	process.env.PI_RU_PROVIDER = "google";
+	// Base64/minified/no-space text used to hit an O(n²) path in splitOversized.
+	const input = "a".repeat(100_000);
+	let calls = 0;
+	globalThis.fetch = async (url) => {
+		calls++;
+		const q = decodeURIComponent(String(url).split("&q=")[1] ?? "");
+		return { ok: true, status: 200, json: async () => [[[q, q]]] };
+	};
+	const start = performance.now();
+	const result = await translateToRussian(input, { timeoutMs: 60_000 });
+	const elapsedMs = performance.now() - start;
+	assert.ok(calls > 50, `expected many hard-split chunks, got ${calls}`);
+	assert.equal(result.text, input);
+	assert.ok(elapsedMs < 1500, `hard-splitting regressed to ${elapsedMs.toFixed(0)}ms`);
+});
+
 test("PI_RU_PROVIDER forces a single provider with no fallback", async () => {
 	process.env.PI_RU_PROVIDER = "mymemory";
 	const calls = mockFetch({

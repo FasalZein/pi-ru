@@ -12,6 +12,7 @@ import {
 	RU_EN_MESSAGE_TYPE,
 	extractAssistantText,
 	isTranslatableAssistantMessage,
+	latestAssistantTextFromEntries,
 } from "../src/output.ts";
 import { translateToEnglish } from "../src/translate.ts";
 
@@ -58,6 +59,29 @@ test("isTranslatableAssistantMessage requires assistant role + prose", () => {
 	assert.equal(isTranslatableAssistantMessage({ role: "user", content: "Привет" }), false);
 	assert.equal(isTranslatableAssistantMessage({ role: "assistant", content: "" }), false);
 	assert.equal(isTranslatableAssistantMessage({ role: "assistant", content: [] }), false);
+});
+
+test("latestAssistantTextFromEntries returns the most recent assistant prose", () => {
+	const entries = [
+		{ type: "message", message: { role: "user", content: "Translate this" } },
+		{ type: "message", message: { role: "assistant", content: "Первый ответ" } },
+		{ type: "message", message: { role: "user", content: "Ещё" } },
+		{ type: "message", message: { role: "assistant", content: "Последний ответ" } },
+		// Display-only EN block + a tool-only assistant turn must be skipped.
+		{ type: "message", message: { role: "assistant", content: [{ type: "toolCall", id: "1", name: "bash", arguments: {} }] } },
+	];
+	assert.equal(latestAssistantTextFromEntries(entries), "Последний ответ");
+});
+
+test("latestAssistantTextFromEntries returns empty when no assistant prose exists", () => {
+	assert.equal(latestAssistantTextFromEntries([]), "");
+	assert.equal(latestAssistantTextFromEntries(undefined), "");
+	assert.equal(
+		latestAssistantTextFromEntries([
+			{ type: "message", message: { role: "user", content: "hi" } },
+		]),
+		"",
+	);
 });
 
 test("translateToEnglish requests the ru|en language pair", async () => {

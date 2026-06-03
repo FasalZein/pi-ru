@@ -1,7 +1,7 @@
 {
   "name": "pi-ru",
   "version": "0.1.0",
-  "description": "Pi extension: type /ru <english> to translate to Russian and send it to the agent. Free, near-instant translation via Google (default), with MyMemory fallback.",
+  "description": "Pi extension for English↔Russian translation: type English and the agent receives Russian (/ru, /ru on), and read the agent's Russian answers back in English (/ru-en, Option+T). Free, near-instant translation via Google (default) with MyMemory fallback.",
   "keywords": [
     "pi-package",
     "translation",
