@@ -181,7 +181,7 @@ export default function (pi: ExtensionAPI) {
 				box.addChild(new Markdown(text, 0, 0, getMarkdownTheme()));
 				return box;
 			},
-			{ placement: "belowEditor" },
+			{ placement: "aboveEditor" },
 		);
 	}
 
